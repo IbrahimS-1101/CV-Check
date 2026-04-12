@@ -2,6 +2,7 @@ import streamlit as st
 import google.generativeai as genai
 from pypdf import PdfReader
 import os
+from google.api_core.exceptions import ResourceExhausted
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="CV Check", page_icon="✅", layout="centered")
@@ -115,11 +116,16 @@ if uploaded_file and api_key:
             cv_text = extract_text_from_pdf(uploaded_file)
             
             if cv_text:
-                # 2. Analyze
+                # 2. Analyze (Now with Error Handling)
                 with st.spinner("AI Coach is reviewing..."):
-                    analysis = analyze_cv(cv_text, api_key)
-                    st.markdown("---")
-                    st.markdown(analysis)
+                    try:
+                        analysis = analyze_cv(cv_text, api_key)
+                        st.markdown("---")
+                        st.markdown(analysis)
+                    except ResourceExhausted:
+                        st.warning("🚦 **Traffic Spike!** The AI Coach is currently reviewing a high volume of CVs. Please wait about 60 seconds and click 'Analyze' again.")
+                    except Exception as e:
+                        st.error("⚠️ An unexpected error occurred. Please try again or check your API key.")
             else:
                 st.error("Could not read the PDF. Please try a text-based PDF (not a scanned image).")
 
