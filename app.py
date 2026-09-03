@@ -14,6 +14,7 @@ from gemini_model import (
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_CV_CHARS = 28_000
 MAX_JOB_DESCRIPTION_CHARS = 12_000
+MAX_PDF_PAGES = 50
 
 
 st.set_page_config(page_title="CV Check", page_icon="✅", layout="centered")
@@ -30,14 +31,18 @@ def get_configured_api_key():
 def extract_text_from_pdf(uploaded_file):
     try:
         reader = PdfReader(uploaded_file)
+        page_count = len(reader.pages)
+        if page_count > MAX_PDF_PAGES:
+            return "", page_count, 0, "This PDF has more than 50 pages."
         page_texts = []
         for page_number, page in enumerate(reader.pages, start=1):
             page_text = (page.extract_text() or "").strip()
             if page_text:
                 page_texts.append(f"--- PAGE {page_number} ---\n{page_text}")
-        return "\n\n".join(page_texts), len(reader.pages), len(page_texts)
-    except Exception:
-        return "", 0, 0
+        return "\n\n".join(page_texts), page_count, len(page_texts), ""
+    except Exception as error:
+        print("PDF extraction failed:", error)
+        return "", 0, 0, "The PDF could not be read safely."
 
 
 def clean_json_response(text):
@@ -189,14 +194,17 @@ Use the dominant language of the resume for every user-facing value in the JSON.
 Return only valid JSON matching this shape:
 {RESPONSE_SHAPE}
 
-Target role:
+<TARGET_ROLE_DATA>
 {role_context}
+</TARGET_ROLE_DATA>
 
-Job description:
+<JOB_DESCRIPTION_DATA>
 {job_context[:MAX_JOB_DESCRIPTION_CHARS]}
+</JOB_DESCRIPTION_DATA>
 
-Resume:
+<RESUME_DATA>
 {resume_text[:MAX_CV_CHARS]}
+</RESUME_DATA>
 """
 
 
@@ -230,13 +238,13 @@ def analyze_cv(resume_text, job_description, target_role, api_key):
 
 def render_bullets(items):
     for item in items:
-        st.markdown(f"- {item}")
+        st.text(f"• {item}")
 
 
 def render_analysis(analysis, model_name, tailored):
     if analysis.get("format") == "markdown":
         st.warning("The model returned a plain-text report; the content is still available below.")
-        st.markdown(analysis["summary"])
+        st.text(analysis["summary"])
         st.caption(f"Model used: {model_name}")
         return
 
@@ -249,7 +257,8 @@ def render_analysis(analysis, model_name, tailored):
     )
 
     if analysis["summary"]:
-        st.markdown(f"**Executive summary**  \n{analysis['summary']}")
+        st.markdown("**Executive summary**")
+        st.text(analysis["summary"])
 
     overview_tab, ats_tab, actions_tab, rewrites_tab = st.tabs(
         ["Overview", "ATS & keywords", "Action plan", "Rewrite examples"]
@@ -277,7 +286,8 @@ def render_analysis(analysis, model_name, tailored):
             st.markdown("#### Priority fixes")
             if analysis["priority_fixes"]:
                 for item in analysis["priority_fixes"][:4]:
-                    st.markdown(f"**{item['priority']}: {item['action']}**")
+                    st.markdown("**Priority fix**")
+                    st.text(f"{item['priority']}: {item['action']}")
                     if item["reason"]:
                         st.caption(item["reason"])
             else:
@@ -301,8 +311,9 @@ def render_analysis(analysis, model_name, tailored):
 
     with actions_tab:
         for index, item in enumerate(analysis["priority_fixes"], start=1):
-            with st.expander(f"{index}. {item['priority']}: {item['action']}"):
-                st.write(item["reason"] or "Make this change while preserving the facts.")
+            with st.expander(f"{index}. {item['priority']} priority fix"):
+                st.text(item["action"])
+                st.text(item["reason"] or "Make this change while preserving the facts.")
         if analysis["interview_prompts"]:
             st.markdown("#### Interview preparation prompts")
             render_bullets(analysis["interview_prompts"])
@@ -311,8 +322,10 @@ def render_analysis(analysis, model_name, tailored):
         if analysis["rewrites"]:
             for index, item in enumerate(analysis["rewrites"], start=1):
                 with st.expander(f"{index}. Suggested rewrite"):
-                    st.markdown(f"**Original**  \n{item['original']}")
-                    st.markdown(f"**Rewrite**  \n{item['rewrite']}")
+                    st.markdown("**Original**")
+                    st.text(item["original"])
+                    st.markdown("**Rewrite**")
+                    st.text(item["rewrite"])
                     if item["why"]:
                         st.caption(item["why"])
         else:
@@ -404,9 +417,11 @@ if uploaded_file:
             st.warning("Add a Gemini API key in the sidebar before analyzing.")
         elif analyze_clicked:
             with st.spinner("Reading your PDF..."):
-                cv_text, page_count, text_page_count = extract_text_from_pdf(uploaded_file)
+                cv_text, page_count, text_page_count, extraction_error = extract_text_from_pdf(uploaded_file)
 
-            if not cv_text.strip():
+            if extraction_error:
+                st.error(extraction_error)
+            elif not cv_text.strip():
                 st.error(
                     "No selectable text was found. Try an OCR-enabled/text-based PDF "
                     "instead of a scanned image."
