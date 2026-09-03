@@ -1,8 +1,7 @@
 import streamlit as st
-import google.generativeai as genai
+from gemini_model import create_gemini_client, generate_content_with_fallback, get_response_text
 from pypdf import PdfReader
 import os
-from google.api_core.exceptions import ResourceExhausted
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="CV Check", page_icon="✅", layout="centered")
@@ -43,14 +42,13 @@ def extract_text_from_pdf(uploaded_file):
         reader = PdfReader(uploaded_file)
         text = ""
         for page in reader.pages:
-            text += page.extract_text()
+            text += page.extract_text() or ""
         return text
     except Exception as e:
         return None
 
 def analyze_cv(text, api_key):
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.5-flash-lite')
+    client = create_gemini_client(api_key)
     
     prompt = f"""
     You are an expert Career Coach. 
@@ -89,8 +87,8 @@ def analyze_cv(text, api_key):
     **[Better Label]:** [The professional version]
     """
     
-    response = model.generate_content(prompt)
-    return response.text
+    response, model_name = generate_content_with_fallback(client, prompt, api_key)
+    return get_response_text(response), model_name
 
 # --- 3. UI LAYOUT ---
 st.title("✅ CV Check")
@@ -105,6 +103,7 @@ with st.sidebar:
         api_key = st.text_input("API Key", type="password")
     
     st.info("💡 Tip: A good CV focuses on **Achievements**, not just duties.")
+    st.caption("Model selection: automatic discovery with fallback.")
 
 # Main Area
 uploaded_file = st.file_uploader("Upload your CV (PDF)", type=["pdf"])
@@ -119,13 +118,16 @@ if uploaded_file and api_key:
                 # 2. Analyze (Now with Error Handling)
                 with st.spinner("AI Coach is reviewing..."):
                     try:
-                        analysis = analyze_cv(cv_text, api_key)
+                        analysis, model_name = analyze_cv(cv_text, api_key)
                         st.markdown("---")
                         st.markdown(analysis)
-                    except ResourceExhausted:
-                        st.warning("🚦 **Traffic Spike!** The AI Coach is currently reviewing a high volume of CVs. Please wait about 60 seconds and click 'Analyze' again.")
+                        st.caption(f"Model used: {model_name}")
                     except Exception as e:
-                        st.error("⚠️ An unexpected error occurred. Please try again or check your API key.")
+                        message = str(e).lower()
+                        if "quota" in message or "rate" in message or "429" in message:
+                            st.warning("🚦 Gemini is rate-limited right now. Please wait a moment and try again.")
+                        else:
+                            st.error("⚠️ Could not analyze this CV. Please try again or check your API key.")
             else:
                 st.error("Could not read the PDF. Please try a text-based PDF (not a scanned image).")
 
