@@ -289,7 +289,7 @@ def render_analysis(analysis, model_name, tailored):
                     st.markdown("**Priority fix**")
                     st.text(f"{item['priority']}: {item['action']}")
                     if item["reason"]:
-                        st.caption(item["reason"])
+                        st.text(item["reason"])
             else:
                 st.info("No priority fixes were returned.")
 
@@ -311,7 +311,7 @@ def render_analysis(analysis, model_name, tailored):
 
     with actions_tab:
         for index, item in enumerate(analysis["priority_fixes"], start=1):
-            with st.expander(f"{index}. {item['priority']} priority fix"):
+            with st.expander(f"{index}. Priority fix"):
                 st.text(item["action"])
                 st.text(item["reason"] or "Make this change while preserving the facts.")
         if analysis["interview_prompts"]:
