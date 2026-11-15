@@ -375,7 +375,11 @@ def report_as_text(analysis, tailored):
     return "\n".join(lines).strip() + "\n"
 
 
-tool_header("CV Check", "Review the text employers can read from your CV and get a prioritized revision plan.")
+tool_header(
+    "CV Check",
+    "Review the text employers can read from your CV and get a prioritized revision plan.",
+    "راجع النص المستخرج من سيرتك الذاتية أو الصقه مباشرةً، وأضف إعلان الوظيفة لتحديد التحسينات ذات الأولوية.",
+)
 
 api_key = get_configured_api_key()
 if not api_key:
