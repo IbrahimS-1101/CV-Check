@@ -1,7 +1,10 @@
 import json
 import os
+from hashlib import sha256
+
 
 import streamlit as st
+
 from google.genai import types
 from pypdf import PdfReader
 
@@ -10,6 +13,7 @@ from gemini_model import (
     generate_content_with_fallback,
     get_response_text,
 )
+from tool_ui import support_footer, tool_header
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_CV_CHARS = 28_000
@@ -23,7 +27,7 @@ st.set_page_config(page_title="CV Check", page_icon="✅", layout="centered")
 def get_configured_api_key():
     try:
         secret_key = st.secrets.get("GEMINI_API_KEY")
-    except Exception:
+    except FileNotFoundError:
         secret_key = None
     return str(secret_key or os.getenv("GEMINI_API_KEY") or "").strip() or None
 
@@ -61,7 +65,7 @@ def clean_json_response(text):
 def as_score(value, default=0):
     try:
         return max(0, min(100, int(round(float(value)))))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -71,12 +75,17 @@ def as_strings(value, limit=8):
     return [str(item).strip() for item in value[:limit] if str(item).strip()]
 
 
+def field_list(data, key):
+    value = data.get(key)
+    return value if isinstance(value, list) else []
+
+
 def normalize_analysis(data):
     if not isinstance(data, dict):
         raise ValueError("Gemini returned an invalid analysis object.")
 
     section_scores = []
-    for item in data.get("section_scores", []):
+    for item in field_list(data, "section_scores"):
         if not isinstance(item, dict):
             continue
         section = str(item.get("section", "")).strip()
@@ -91,7 +100,7 @@ def normalize_analysis(data):
             )
 
     priority_fixes = []
-    for item in data.get("priority_fixes", []):
+    for item in field_list(data, "priority_fixes"):
         if not isinstance(item, dict):
             continue
         action = str(item.get("action", "")).strip()
@@ -106,7 +115,7 @@ def normalize_analysis(data):
             )
 
     rewrites = []
-    for item in data.get("rewrites", []):
+    for item in field_list(data, "rewrites"):
         if not isinstance(item, dict):
             continue
         original = str(item.get("original", "")).strip()
@@ -247,27 +256,25 @@ def render_bullets(items):
         st.text(f"• {item}")
 
 
-def render_analysis(analysis, model_name, tailored):
+def render_analysis(analysis, tailored):
     if analysis.get("format") == "markdown":
         st.warning("The model returned a plain-text report; the content is still available below.")
         st.text(analysis["summary"])
-        st.caption(f"Model used: {model_name}")
         return
 
     score = analysis["overall_score"]
-    st.metric("Overall CV score", f"{score}/100")
-    st.progress(score / 100)
+    st.metric("Estimated CV clarity & evidence", f"{score}/100")
     st.caption(
         f"Feedback language: {analysis['language']} · "
-        f"Model used: {model_name}"
+        "Scores are AI estimates."
     )
 
     if analysis["summary"]:
         st.markdown("**Executive summary**")
         st.text(analysis["summary"])
 
-    overview_tab, ats_tab, actions_tab, rewrites_tab = st.tabs(
-        ["Overview", "ATS & keywords", "Action plan", "Rewrite examples"]
+    actions_tab, overview_tab, ats_tab, rewrites_tab = st.tabs(
+        ["Action plan", "Overview", "ATS & keywords", "Rewrite examples"]
     )
 
     with overview_tab:
@@ -284,24 +291,12 @@ def render_analysis(analysis, model_name, tailored):
                 ]
             )
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("#### Strengths")
-            render_bullets(analysis["strengths"] or ["No clear strength was returned."])
-        with col2:
-            st.markdown("#### Priority fixes")
-            if analysis["priority_fixes"]:
-                for item in analysis["priority_fixes"][:4]:
-                    st.markdown("**Priority fix**")
-                    st.text(f"{item['priority']}: {item['action']}")
-                    if item["reason"]:
-                        st.text(item["reason"])
-            else:
-                st.info("No priority fixes were returned.")
+        st.markdown("#### Strengths")
+        render_bullets(analysis["strengths"] or ["No clear strength was returned."])
 
     with ats_tab:
         ats = analysis["ats"]
-        st.metric("ATS readiness", f"{ats['score']}/100")
+        st.metric("Estimated ATS readiness", f"{ats['score']}/100")
         if tailored:
             st.markdown("#### Keyword matches")
             render_bullets(ats["keyword_matches"] or ["No clear matches were identified."])
@@ -316,10 +311,14 @@ def render_analysis(analysis, model_name, tailored):
         render_bullets(ats["format_risks"] or ["No obvious parsing risks were identified."])
 
     with actions_tab:
-        for index, item in enumerate(analysis["priority_fixes"], start=1):
-            with st.expander(f"{index}. Priority fix"):
+        if not analysis["priority_fixes"]:
+            st.info("No priority fixes were returned.")
+        for item in analysis["priority_fixes"]:
+            with st.container(border=True):
+                st.caption(f"{item['priority']} priority")
                 st.text(item["action"])
-                st.text(item["reason"] or "Make this change while preserving the facts.")
+                if item["reason"]:
+                    st.text(item["reason"])
         if analysis["interview_prompts"]:
             st.markdown("#### Interview preparation prompts")
             render_bullets(analysis["interview_prompts"])
@@ -341,148 +340,124 @@ def render_analysis(analysis, model_name, tailored):
         "Download analysis JSON",
         data=json.dumps(analysis, ensure_ascii=False, indent=2),
         file_name="cv-check-analysis.json",
-        mime="application/json",
+        mime="application/json", on_click="ignore",
     )
 
 
-def show_footer():
-    st.markdown("---")
-    st.markdown(
-        """
-        <div style="text-align: center; padding-top: 20px;">
-            <a href="https://buymeacoffee.com/isamir" target="_blank">
-                <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 50px !important;width: 180px !important;" >
-            </a>
-            <p style="margin-top: 15px; color: #aaa; font-size: 0.9em;">
-                This tool is 100% free. If it saved you time, a coffee is always appreciated! ☕
-            </p>
-            <p style="color: #999; font-size: 0.8em;">
-                Made by Ibrahim Samir | <a href="https://takea5.com" target="_blank" style="color: #999; text-decoration: none;">Takea5.com</a>
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+def report_as_text(analysis, tailored):
+    if analysis.get("format") == "markdown":
+        return analysis["summary"]
+
+    lines = ["CV Check · Review", "", analysis["summary"], "", "Priority fixes"]
+    for item in analysis["priority_fixes"]:
+        lines.append(f"• {item['priority']} · {item['action']}")
+        if item["reason"]:
+            lines.append(f"  {item['reason']}")
+    for title, items in [
+        ("Strengths", analysis["strengths"]),
+        ("Section feedback", [f"{item['section']} · {item['feedback']}" for item in analysis["section_scores"]]),
+        ("Format and parsing risks", analysis["ats"]["format_risks"]),
+        ("Keyword matches", analysis["ats"]["keyword_matches"] if tailored else []),
+        ("Keyword gaps", analysis["ats"]["keyword_gaps"] if tailored else []),
+        ("Interview preparation", analysis["interview_prompts"]),
+    ]:
+        if items:
+            lines.extend(["", title, *(f"• {item}" for item in items)])
+    if analysis["rewrites"]:
+        lines.extend(["", "Suggested rewrites"])
+        for item in analysis["rewrites"]:
+            lines.extend([f"Original — {item['original']}", f"Rewrite — {item['rewrite']}"])
+            if item["why"]:
+                lines.append(item["why"])
+            lines.append("")
+    if analysis["language"] and analysis["language"] != "Unknown":
+        lines.extend(["", f"Feedback language · {analysis['language']}"])
+    return "\n".join(lines).strip() + "\n"
 
 
-# --- UI ---
+tool_header("CV Check", "Review the text employers can read from your CV and get a prioritized revision plan.")
+
 api_key = get_configured_api_key()
+if not api_key:
+    with st.expander("Gemini API key"):
+        api_key = st.text_input("Enter your Gemini API key", type="password").strip()
 
-st.title("✅ CV Check")
-st.markdown(
-    "Get practical, evidence-based feedback on your resume — with optional job matching."
-)
+mode = st.radio("CV source", ["Upload a PDF", "Paste CV text"], horizontal=True)
+cv_text = ""
 
-with st.sidebar:
-    st.header("⚙️ Settings")
-    if api_key:
-        st.success("✅ System Online")
+with st.container(border=True):
+    if mode == "Upload a PDF":
+        upload = st.file_uploader("CV PDF", type=["pdf"])
+        st.caption("Up to 10 MB and 50 pages. For scanned PDFs, paste the text instead.")
+        signature = None if upload is None else sha256(upload.getbuffer()).hexdigest()
+        if st.session_state.get("pdf_signature") != signature:
+            st.session_state.pdf_signature = signature
+            st.session_state.pop("pdf_extract", None)
+            st.session_state.pop("pdf_cv_text", None)
+        if upload:
+            if upload.size > MAX_UPLOAD_BYTES:
+                st.error("This PDF is larger than 10 MB.")
+            else:
+                if "pdf_extract" not in st.session_state:
+                    with st.spinner("Reading the PDF…"):
+                        st.session_state.pdf_extract = extract_text_from_pdf(upload)
+                extracted, pages, text_pages, error = st.session_state.pdf_extract
+                if error:
+                    st.error(error)
+                elif not extracted.strip():
+                    st.warning("No selectable text was found. Choose Paste CV text to continue.")
+                else:
+                    st.caption(f"Selectable text on {text_pages} of {pages} pages.")
+                    if len(extracted) > MAX_CV_CHARS:
+                        st.warning(f"The preview uses the first {MAX_CV_CHARS:,} extracted characters.")
+                    cv_text = st.text_area(
+                        "Review or edit the extracted text", value=extracted[:MAX_CV_CHARS],
+                        key="pdf_cv_text", height=200, max_chars=MAX_CV_CHARS,
+                    )
     else:
-        st.warning("No configured Gemini key.")
-        api_key = st.text_input("Gemini API key", type="password")
-
-    st.caption("Model selection: automatic discovery with fallback.")
-    st.info(
-        "For privacy, remove sensitive details you do not need reviewed. "
-        "Do not treat this AI feedback as a hiring decision."
-    )
-
-uploaded_file = st.file_uploader("Upload your CV (PDF)", type=["pdf"])
-
-target_role = st.text_input(
-    "Target role (optional)",
-    placeholder="e.g., Product Designer, Data Analyst, Marketing Manager",
-)
-job_description = st.text_area(
-    "Job description (optional)",
-    height=180,
-    placeholder="Paste the job posting here for targeted keyword and relevance feedback.",
-)
-
-if uploaded_file:
-    file_signature = (
-        f"{getattr(uploaded_file, 'file_id', '')}:"
-        f"{uploaded_file.name}:{uploaded_file.size}"
-    )
-    if st.session_state.get("analysis_signature") != file_signature:
-        st.session_state.pop("last_analysis", None)
-        st.session_state.pop("last_model", None)
-        st.session_state.analysis_signature = file_signature
-
-    if uploaded_file.size > MAX_UPLOAD_BYTES:
-        st.error("This PDF is larger than 10 MB. Please upload a smaller file.")
-    else:
-        st.caption(f"File: {uploaded_file.name} · {uploaded_file.size / 1024:.0f} KB")
-        analyze_clicked = st.button(
-            "Analyze my CV",
-            type="primary",
-            disabled=not bool(api_key),
+        cv_text = st.text_area(
+            "CV text", key="pasted_cv_text", height=200, max_chars=MAX_CV_CHARS,
+            placeholder="Paste your summary, work experience, skills, and education.",
         )
 
-        if not api_key:
-            st.warning("Add a Gemini API key in the sidebar before analyzing.")
-        elif analyze_clicked:
-            with st.spinner("Reading your PDF..."):
-                cv_text, page_count, text_page_count, extraction_error = extract_text_from_pdf(uploaded_file)
+with st.expander("Tailor the review to a job"):
+    target_role = st.text_input("Target role (optional)", max_chars=160)
+    job_description = st.text_area("Job description (optional)", height=160, max_chars=MAX_JOB_DESCRIPTION_CHARS)
 
-            if extraction_error:
-                st.error(extraction_error)
-            elif not cv_text.strip():
-                st.error(
-                    "No selectable text was found. Try an OCR-enabled/text-based PDF "
-                    "instead of a scanned image."
-                )
-            elif len(cv_text.strip()) < 100:
-                st.warning(
-                    "Very little text was extracted. The score may be unreliable; "
-                    "try an OCR-enabled PDF."
-                )
-            else:
-                if len(cv_text) > MAX_CV_CHARS:
-                    st.info(
-                        f"This PDF has {len(cv_text):,} extracted characters. "
-                        f"The analysis uses the first {MAX_CV_CHARS:,} characters."
-                    )
+st.caption("Analyzing sends the text above to Google Gemini. You can remove contact details before submitting.")
+if cv_text.strip() and len(cv_text.strip()) < 100:
+    st.warning("Add at least 100 characters from your CV for a meaningful review.")
 
-                if text_page_count < page_count:
-                    st.info(
-                        f"Text was extracted from {text_page_count} of {page_count} pages. "
-                        "Check that image-only pages contain no important content."
-                    )
+request = (cv_text.strip(), job_description.strip(), target_role.strip())
+request_signature = sha256(json.dumps(request, ensure_ascii=False).encode("utf-8")).hexdigest()
+if st.session_state.get("cv_request") != request_signature:
+    st.session_state.pop("last_analysis", None)
+    st.session_state.pop("last_model", None)
 
-                with st.spinner("Comparing evidence, clarity, and ATS readiness..."):
-                    try:
-                        analysis, model_name = analyze_cv(
-                            cv_text,
-                            job_description,
-                            target_role,
-                            api_key,
-                        )
-                        st.session_state.last_analysis = analysis
-                        st.session_state.last_model = model_name
-                    except Exception as error:
-                        message = str(error).lower()
-                        if "quota" in message or "rate" in message or "429" in message:
-                            st.warning(
-                                "Gemini is rate-limited right now. Please wait a moment and try again."
-                            )
-                        else:
-                            st.error(
-                                "Could not analyze this CV. Please try again or check the API key."
-                            )
+if st.button("Analyze my CV", type="primary", disabled=not api_key or len(request[0]) < 100):
+    with st.spinner("Reviewing experience, keywords, and clarity…"):
+        try:
+            analysis, _ = analyze_cv(*request, api_key)
+            if not analysis.get("summary"):
+                raise ValueError("Empty analysis")
+            st.session_state.cv_request = request_signature
+            st.session_state.last_analysis = analysis
+        except Exception as error:
+            status = getattr(error, "code", None)
+            message = "Gemini is busy. Wait a moment and run the review again." if status == 429 else (
+                "Couldn't complete the review. Check your API key or try again."
+            )
+            st.error(message)
 
 if st.session_state.get("last_analysis"):
-    st.markdown("---")
-    st.markdown("## Your results")
-    render_analysis(
-        st.session_state.last_analysis,
-        st.session_state.get("last_model", "automatic"),
-        bool(job_description.strip()),
-    )
-else:
-    st.info(
-        "Upload a text-based PDF. Add a job description when you want "
-        "role-specific feedback and keyword gaps."
+    st.subheader("Your CV review", anchor=False)
+    analysis = st.session_state.last_analysis
+    tailored = bool(request[1])
+    render_analysis(analysis, tailored)
+    st.download_button(
+        "Download review as text", report_as_text(analysis, tailored),
+        "cv-review.txt", "text/plain", type="primary", on_click="ignore",
     )
 
-show_footer()
+support_footer()
+
